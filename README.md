@@ -1,8 +1,8 @@
 # swoop
 
 **Hyprland-style workspace cycling for macOS.** Glide through your Spaces with
-`⌥ Tab`, the way `SUPER + Tab` works on Hyprland, with the same native slide
-animation you get from a three-finger trackpad swipe.
+`⌥ Tab`, the way `SUPER + Tab` works on Hyprland, using the same slide you get
+from a three-finger trackpad swipe, only faster.
 
 <!-- TODO: add a demo GIF here, e.g. ![demo](docs/demo.gif) -->
 
@@ -19,11 +19,13 @@ replacing Mission Control and without disabling System Integrity Protection.
 
 ## Features
 
-- **Native animation.** swoop triggers macOS's own "Move left/right a space"
-  shortcuts, so switching looks and feels like the trackpad gesture.
-- **Wrap-around** in both directions.
-- **Rapid tapping.** Hold `⌥` and tap `Tab` repeatedly; every step is checked
-  against the real active Space, so it never gets out of sync.
+- **Fast native slide.** swoop drives Mission Control with synthesized trackpad
+  swipes, so switching uses the real Spaces animation, just quicker: about
+  170 ms by default, or instant if you prefer.
+- **Instant wrap-around** in both directions. Going from the last Space back to
+  the first takes about 60 ms.
+- **Rapid tapping.** Hold `⌥` and tap `Tab` as fast as you like, wrapping
+  included; swoop tracks where macOS is heading so it never gets out of sync.
 - **Multi-display aware.** It cycles the Spaces of the display you're on,
   fullscreen apps included.
 - **SIP stays on.** It only reads Space information through private APIs and
@@ -61,18 +63,30 @@ shortcut:
 3. swoop picks up the permission within a couple of seconds. Check with
    `make logs`; you should see `Listening for Option+Tab / Option+Shift+Tab`.
 
-### Recommended: faster wrap-around
+### Choosing the speed
 
-Enable **System Settings → Keyboard → Keyboard Shortcuts → Mission Control →
-Switch to Desktop 1–9**. swoop then jumps straight to the first or last desktop
-in a single slide when wrapping, instead of gliding back across every Space.
+```sh
+defaults write com.elias.swoop speed fast      # quick slide, ~170 ms (default)
+defaults write com.elias.swoop speed instant   # no visible slide, ~50 ms
+defaults write com.elias.swoop speed native    # macOS's own shortcut slide, ~0.6–1.2 s
+defaults write com.elias.swoop speed 50        # fine-tune: raw swipe velocity
+```
+
+Changes apply on the next tap; no restart needed. For fine-tuning, the
+velocity-to-duration curve is steep: about 50 gives a ~0.5 s slide, 53 about
+170 ms, 57 about 115 ms, and 80 or more is effectively instant.
+
+`native` uses the **Move left/right a space** keyboard shortcuts instead of
+swipes. It's a fallback in case a macOS update breaks the synthesized swipes.
+In that mode, enabling **Keyboard Shortcuts → Mission Control → Switch to
+Desktop 1–9** lets wraps jump straight to a desktop.
 
 ## Usage
 
 Once installed, just press `⌥ Tab`. From the terminal:
 
 ```sh
-swoop status   # list Spaces on the active display and which shortcuts are enabled
+swoop status   # list Spaces on the active display, the speed, and which shortcuts are enabled
 swoop next     # switch once (the terminal app itself needs Accessibility access)
 swoop prev
 ```
@@ -95,41 +109,46 @@ Make targets:
 2. Private, read-only SkyLight calls (`CGSGetActiveSpace`,
    `CGSCopyManagedDisplaySpaces`) give the current Space and the ordered list of
    Spaces on the active display.
-3. Each tap moves a *target* Space one step. swoop then presses your configured
-   shortcut ("Move left/right a space", or "Switch to Desktop N" when wrapping)
-   one step at a time. After each step it waits until macOS has actually switched
-   and retries if the press was dropped mid-animation.
+3. Each tap moves a *target* Space one step, and swoop posts a synthesized
+   horizontal Dock swipe (the event a three-finger trackpad swipe produces) with
+   a release velocity set by `speed`. A higher velocity makes macOS finish the
+   slide faster.
+4. macOS queues back-to-back swipes, so a wrap is sent as one instant burst of
+   swipes. macOS only reports the new Space once a slide settles, so swoop keeps
+   track of where it's heading itself; rapid taps never get out of sync.
 
-Shortcut bindings are read from `com.apple.symbolichotkeys`, so swoop also works
-if you've rebound them.
+In `native` mode swoop presses your "Move left/right a space" (or "Switch to
+Desktop N") shortcuts instead, read from `com.apple.symbolichotkeys` so rebound
+keys still work. macOS drops a shortcut press that reverses direction mid-slide,
+so in this mode a wrap waits for the current slide to finish.
 
 ## Troubleshooting
 
 **`⌥ Tab` does nothing, and the log says "Waiting for Accessibility permission".**
-swoop is ad-hoc signed, so macOS ties the permission to that exact build. After
-rebuilding, the existing **Swoop** entry in Settings no longer matches and turning
-it on has no effect. Select it, remove it with **−**, add `build/Swoop.app` again
-with **+**, then run `make restart`.
+Make sure **Swoop** is on in Accessibility. If it already is, the entry may come
+from an older build that macOS no longer matches. Remove it with **−**, add
+`build/Swoop.app` again with **+**, and run `make restart`. Builds are signed
+with a stable identity, so this shouldn't be needed again after rebuilding.
 
-**Wrapping glides through every Space.** Enable the *Switch to Desktop N*
-shortcuts (see [Recommended: faster wrap-around](#recommended-faster-wrap-around)).
-Wrapping to a fullscreen app always glides, because macOS has no direct shortcut
-for those.
+**Switching stopped working after a macOS update.** The synthesized swipes rely on
+undocumented event fields. Try `defaults write com.elias.swoop speed native`
+and please open an issue.
 
 **An app needs `⌥ Tab` itself.** swoop currently captures it globally.
 
 ## Limitations
 
-- Relies on undocumented SkyLight APIs, which a future macOS release could change.
+- Relies on undocumented SkyLight APIs and gesture event fields, which a future
+  macOS release could change (`native` mode avoids the gesture fields).
 - The shortcut is fixed to `⌥ Tab` for now.
-- Quick taps can occasionally lag about 0.35 s while swoop retries a press
-  macOS dropped during an animation.
+- In `native` mode, wrapping in the middle of fast tapping waits for the current
+  slide to finish before heading back the other way.
 
 ## Roadmap
 
 - [ ] Configurable shortcut
 - [ ] On-screen workspace indicator overlay
-- [ ] Faster, trackpad-like glide via synthesized swipe gestures
+- [x] Faster, trackpad-like glide via synthesized swipe gestures
 - [ ] Homebrew tap and signed release builds
 
 ## Contributing
