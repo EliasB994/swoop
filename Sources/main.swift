@@ -161,17 +161,17 @@ func swipe(right: Bool, velocity: Double) {
 
 /// How a switch looks, set with `defaults write com.elias.swoop speed <value>`
 /// and read on every tap, so changes apply without a restart:
-///   fast     quick slide (~170 ms), the default
+///   fast     quick slide (~150 ms), the default
 ///   instant  no visible slide (~50 ms)
 ///   native   the system shortcut's own slide (~0.6–1.2 s)
-///   <number> raw swipe velocity: ≤50 is a normal-speed slide, ~53 fast, ≥80 instant
+///   <number> raw swipe velocity: ≤50 is a normal-speed slide, ~40 moderately fast, ≥80 instant
 enum Speed {
     case native
     case swipe(velocity: Double)
 }
 
-let fastVelocity = 53.0
-let instantVelocity = 400.0
+let fastVelocity = 40.0
+let instantVelocity = 200.0
 
 func currentSpeed() -> Speed {
     let domain = "com.elias.swoop" as CFString
