@@ -4,7 +4,7 @@
 `⌥ Tab`, the way `SUPER + Tab` works on Hyprland, using the same slide you get
 from a three-finger trackpad swipe, only faster.
 
-<!-- TODO: add a demo GIF here, e.g. ![demo](docs/demo.gif) -->
+[demo](docs/demo.gif)
 
 | Shortcut | Action |
 |---|---|
