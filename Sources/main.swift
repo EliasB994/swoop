@@ -1,8 +1,9 @@
 // swoop — Hyprland-style workspace cycling for macOS.
 //
 // Option+Tab glides to the next Space, Option+Shift+Tab to the previous one,
-// wrapping around at the ends. Switching is done by triggering the system's own
-// "Move left/right a space" shortcuts, so you get the native slide animation.
+// wrapping around at the ends. Switching is done with synthesized trackpad
+// swipes (fast, tunable slide) or the system's own "Move left/right a space"
+// shortcuts (native slide), depending on the `speed` setting.
 
 import ApplicationServices
 import Foundation
@@ -102,6 +103,93 @@ func press(_ hotkey: Hotkey) {
     }
 }
 
+// MARK: - Synthesized trackpad swipes (undocumented CGEvent fields)
+
+enum GestureField: UInt32 {
+    case eventType = 55
+    case hidType = 110
+    case scrollY = 119
+    case swipeMotion = 123
+    case swipeProgress = 124
+    case swipeVelocityX = 129
+    case phase = 132
+    case flagBits = 135
+    case zoomDeltaX = 139
+}
+
+let gestureEventType: Int64 = 29
+let dockControlEventType: Int64 = 30
+let dockSwipeHIDType: Int64 = 23
+let horizontalMotion: Int64 = 1
+let phaseBegan: Int64 = 1
+let phaseEnded: Int64 = 4
+
+extension CGEvent {
+    func set(_ field: GestureField, _ value: Int64) {
+        setIntegerValueField(CGEventField(rawValue: field.rawValue)!, value: value)
+    }
+
+    func set(_ field: GestureField, _ value: Double) {
+        setDoubleValueField(CGEventField(rawValue: field.rawValue)!, value: value)
+    }
+}
+
+/// Posts a one-space horizontal Dock swipe, as if flicked on the trackpad.
+/// macOS finishes the slide faster the higher the release velocity.
+func swipe(right: Bool, velocity: Double) {
+    for phase in [phaseBegan, phaseEnded] {
+        guard let dock = CGEvent(source: nil), let gesture = CGEvent(source: nil) else { return }
+        dock.set(.eventType, dockControlEventType)
+        dock.set(.hidType, dockSwipeHIDType)
+        dock.set(.phase, phase)
+        dock.set(.flagBits, Int64(right ? 1 : 0))
+        dock.set(.swipeMotion, horizontalMotion)
+        dock.set(.scrollY, 0.0)
+        dock.set(.zoomDeltaX, Double(Float.leastNonzeroMagnitude))
+        if phase == phaseEnded {
+            dock.set(.swipeProgress, right ? 1.0 : -1.0)
+            dock.set(.swipeVelocityX, right ? velocity : -velocity)
+        }
+        dock.post(tap: .cgSessionEventTap)
+
+        gesture.set(.eventType, gestureEventType)
+        gesture.post(tap: .cgSessionEventTap)
+    }
+}
+
+// MARK: - Settings
+
+/// How a switch looks, set with `defaults write com.elias.swoop speed <value>`
+/// and read on every tap, so changes apply without a restart:
+///   fast     quick slide (~170 ms), the default
+///   instant  no visible slide (~50 ms)
+///   native   the system shortcut's own slide (~0.6–1.2 s)
+///   <number> raw swipe velocity: ≤50 is a normal-speed slide, ~53 fast, ≥80 instant
+enum Speed {
+    case native
+    case swipe(velocity: Double)
+}
+
+let fastVelocity = 53.0
+let instantVelocity = 400.0
+
+func currentSpeed() -> Speed {
+    let domain = "com.elias.swoop" as CFString
+    CFPreferencesAppSynchronize(domain)
+    switch CFPreferencesCopyAppValue("speed" as CFString, domain) {
+    case let number as NSNumber:
+        return .swipe(velocity: number.doubleValue)
+    case let text as String:
+        switch text.lowercased() {
+        case "native": return .native
+        case "instant": return .swipe(velocity: instantVelocity)
+        default: return .swipe(velocity: Double(text) ?? fastVelocity)
+        }
+    default:
+        return .swipe(velocity: fastVelocity)
+    }
+}
+
 // MARK: - Switching
 
 enum Direction: Int {
@@ -109,51 +197,74 @@ enum Direction: Int {
     case next = 1
 }
 
-/// The space index the user has asked for, or nil when idle. Quick repeated taps
-/// build on this rather than on the active space, which lags during the slide.
-var target: Int?
-var driving = false
-
-/// macOS drops shortcut presses that arrive mid-animation, so every step is
-/// confirmed against the real active space and retried if nothing happened.
-let stepTimeout: TimeInterval = 0.35
-let maxAttempts = 3
+/// macOS only reports the new active space once a slide settles. It queues further
+/// switches sent mid-slide, but drops a keyboard-shortcut reversal (swipes are fine).
+/// So swoop tracks two things itself:
+/// - `target`: where the user wants to end up; every tap moves it one step.
+/// - `inFlight`: where macOS will land once the presses already sent finish.
+var target: UInt64?
+var inFlight: (id: UInt64, direction: Int, pressedAt: Date)?
+var flushScheduled = false
+/// Assume macOS has settled after this long, in case a press was dropped.
+let settleTimeout: TimeInterval = 2.0
+let settlePollInterval: TimeInterval = 0.05
 
 func swoop(_ direction: Direction) {
     guard let layout = currentLayout(), layout.count > 1 else { return }
+    refreshInFlight(layout)
 
-    let base = target.flatMap { $0 < layout.count ? $0 : nil } ?? layout.currentIndex
-    target = (base + direction.rawValue + layout.count) % layout.count
-    if !driving { drive(attempt: 0) }
+    let busy = inFlight != nil || flushScheduled
+    let from = busy ? target.flatMap { layout.ids.firstIndex(of: $0) } ?? layout.currentIndex : layout.currentIndex
+    target = layout.ids[(from + direction.rawValue + layout.count) % layout.count]
+    flush()
 }
 
-/// Takes one step toward `target`, waits for macOS to actually switch, then repeats.
-func drive(attempt: Int) {
-    guard let goal = target, let layout = currentLayout(), goal < layout.count,
-          layout.currentIndex != goal
-    else { return finish() }
-
-    guard attempt < maxAttempts else {
-        log("gave up moving from space \(layout.currentIndex + 1) to \(goal + 1)")
-        return finish()
-    }
-
-    guard pressStep(from: layout.currentIndex, to: goal, in: layout) else { return finish() }
-    driving = true
-
-    let deadline = Date().addingTimeInterval(stepTimeout)
-    waitForSpaceChange(from: layout.ids[layout.currentIndex], until: deadline) { changed in
-        drive(attempt: changed ? 0 : attempt + 1)
+/// Clears `inFlight` once macOS reports arriving there (or it's clearly not going to).
+func refreshInFlight(_ layout: SpaceLayout) {
+    guard let f = inFlight else { return }
+    if f.id == layout.ids[layout.currentIndex] || !layout.ids.contains(f.id)
+        || Date().timeIntervalSince(f.pressedAt) > settleTimeout {
+        inFlight = nil
     }
 }
 
-func finish() {
-    driving = false
-    target = nil
+/// Sends the switches that take macOS from where it's already heading to `target`.
+/// With keyboard shortcuts, a change of direction waits for the current slide to settle.
+func flush() {
+    flushScheduled = false
+    guard let goal = target, let layout = currentLayout(), let to = layout.ids.firstIndex(of: goal) else {
+        target = nil
+        inFlight = nil
+        return
+    }
+    refreshInFlight(layout)
+
+    let from = inFlight.flatMap { layout.ids.firstIndex(of: $0.id) } ?? layout.currentIndex
+    guard from != to else { return }
+    let direction = to > from ? 1 : -1
+
+    let speed = currentSpeed()
+    if case .native = speed, let f = inFlight, f.direction != direction {
+        flushScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + settlePollInterval) { flush() }
+        return
+    }
+
+    guard move(from: from, to: to, in: layout, speed: speed) else { return }
+    inFlight = (goal, direction, Date())
 }
 
-/// Presses the shortcut that best moves from `from` toward `to`.
-func pressStep(from: Int, to: Int, in layout: SpaceLayout) -> Bool {
+/// Sends the swipes or shortcuts that take macOS from space `from` to space `to`.
+func move(from: Int, to: Int, in layout: SpaceLayout, speed: Speed) -> Bool {
+    let steps = abs(to - from)
+
+    if case .swipe(let velocity) = speed {
+        // More than one step only happens when wrapping: do it instantly. macOS
+        // queues back-to-back swipes, so the whole wrap lands in ~60 ms.
+        for _ in 0..<steps { swipe(right: to > from, velocity: steps > 1 ? instantVelocity : velocity) }
+        return true
+    }
+
     // Wrapping: jump straight there if "Switch to Desktop N" is enabled.
     if abs(to - from) > 1, let n = layout.desktopNumber(at: to), n <= 9,
        let jump = symbolicHotkey(desktop1ID + n - 1) {
@@ -161,21 +272,13 @@ func pressStep(from: Int, to: Int, in layout: SpaceLayout) -> Bool {
         return true
     }
 
-    // Otherwise a single native slide toward the target.
+    // Otherwise native slides; macOS queues them, so a wrap glides across every space.
     guard let step = symbolicHotkey(to > from ? moveRightSpaceID : moveLeftSpaceID) else {
         log("Move left/right a space shortcuts are disabled in System Settings")
         return false
     }
-    press(step)
+    for _ in 0..<steps { press(step) }
     return true
-}
-
-func waitForSpaceChange(from space: UInt64, until deadline: Date, then done: @escaping (Bool) -> Void) {
-    if CGSGetActiveSpace(CGSMainConnectionID()) != space { return done(true) }
-    if Date() >= deadline { return done(false) }
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
-        waitForSpaceChange(from: space, until: deadline, then: done)
-    }
 }
 
 // MARK: - Event tap
@@ -267,6 +370,10 @@ func printStatus() {
     }
     let shortcuts = (1...9).filter { symbolicHotkey(desktop1ID + $0 - 1) != nil }
     print("Move left/right a space: \(symbolicHotkey(moveLeftSpaceID) != nil ? "on" : "off")/\(symbolicHotkey(moveRightSpaceID) != nil ? "on" : "off")")
+    switch currentSpeed() {
+    case .native: print("Speed: native (keyboard shortcuts)")
+    case .swipe(let velocity): print("Speed: swipe velocity \(velocity)")
+    }
     print("Switch to Desktop N shortcuts enabled: \(shortcuts.isEmpty ? "none" : shortcuts.map(String.init).joined(separator: ", "))")
 }
 
@@ -274,7 +381,6 @@ switch CommandLine.arguments.dropFirst().first {
 case nil, "run": runDaemon()
 case "next", "prev":
     swoop(CommandLine.arguments[1] == "next" ? .next : .prev)
-    while driving { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
 case "status": printStatus()
 default:
     print("usage: swoop [run | next | prev | status]")

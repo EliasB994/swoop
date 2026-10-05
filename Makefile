@@ -14,7 +14,7 @@ $(BIN): Sources/main.swift Info.plist
 	mkdir -p $(APP)/Contents/MacOS
 	cp Info.plist $(APP)/Contents/Info.plist
 	swiftc -swift-version 5 -O -o $(BIN) Sources/main.swift -framework ApplicationServices
-	codesign --force --sign - --identifier $(LABEL) $(APP)
+	codesign --force --sign - --identifier $(LABEL) -r='designated => identifier "$(LABEL)"' $(APP)
 
 run: build
 	$(BIN) run
