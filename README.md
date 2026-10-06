@@ -4,8 +4,6 @@
 `⌥ Tab`, the way `SUPER + Tab` works on Hyprland, using the same slide you get
 from a three-finger trackpad swipe, only faster.
 
-[demo](docs/demo.gif)
-
 | Shortcut | Action |
 |---|---|
 | `⌥ Tab` | Next Space (wraps from the last to the first) |
